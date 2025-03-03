@@ -4,9 +4,55 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 
-// Backup stream URL in case the main one fails
-const backupStreamUrl = "https://uk24freenew.listen2myradio.com/live.mp3?typeportmount=s1_14899_stream_645397155";
-let streamUrl = backupStreamUrl;
+// Backup stream URLs in case the main one fails
+const backupStreamUrls = [
+    "https://uk24freenew.listen2myradio.com/live.mp3?typeportmount=s1_14899_stream_645397155",
+    "https://stream-152.zeno.fm/5q54r1ukxp8uv?zs=TxN8UxQNTHGxGz_-FeHZ4g"
+];
+let streamUrl = backupStreamUrls[0];
+let currentBackupIndex = 0;
+
+// Function to test if a URL is accessible
+async function testStreamUrl(url) {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
+
+        const response = await axios.get(url, {
+            responseType: 'stream',
+            timeout: 3000,
+            signal: controller.signal,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': '*/*',
+                'Range': 'bytes=0-8192' // Only request first 8KB to test
+            }
+        });
+
+        clearTimeout(timeoutId);
+
+        // Get a small chunk of data to verify it's actually streaming
+        const chunk = await new Promise((resolve, reject) => {
+            response.data.once('data', chunk => {
+                response.data.destroy(); // Clean up the stream
+                resolve(chunk);
+            });
+            response.data.once('error', reject);
+        });
+
+        return chunk.length > 0;
+    } catch (error) {
+        console.log(`Test failed for URL ${url}:`, error.message);
+        return false;
+    }
+}
+
+// Function to switch to next backup URL
+async function switchToNextBackup() {
+    currentBackupIndex = (currentBackupIndex + 1) % backupStreamUrls.length;
+    streamUrl = backupStreamUrls[currentBackupIndex];
+    console.log('Switched to backup URL:', streamUrl);
+}
 
 // Function to extract stream URL from the source page
 async function updateStreamUrl() {
@@ -26,33 +72,45 @@ async function updateStreamUrl() {
             const newUrl = match[0];
             console.log('Found new stream URL:', newUrl);
             
-            // Verify the new URL is accessible
-            try {
-                const testResponse = await axios.head(newUrl, { timeout: 5000 });
-                if (testResponse.status === 200) {
-                    streamUrl = newUrl;
-                    console.log('Stream URL updated successfully');
-                } else {
-                    console.log('New URL not accessible, keeping current URL');
+            // Test the new URL
+            const isAccessible = await testStreamUrl(newUrl);
+            if (isAccessible) {
+                streamUrl = newUrl;
+                console.log('Stream URL updated successfully');
+            } else {
+                console.log('New URL not accessible, testing backup URLs...');
+                
+                // Test all backup URLs
+                for (let url of backupStreamUrls) {
+                    console.log('Testing backup URL:', url);
+                    if (await testStreamUrl(url)) {
+                        streamUrl = url;
+                        console.log('Switched to working backup URL:', url);
+                        return;
+                    }
                 }
-            } catch (error) {
-                console.error('Error testing new URL:', error.message);
-                console.log('Keeping current URL');
+                
+                // If current URL is not working and no backup works, rotate through backups
+                await switchToNextBackup();
             }
         } else {
-            console.log('No stream URL found in the page');
+            console.log('No stream URL found in the page, testing backup URLs...');
+            // Test current URL first
+            if (!await testStreamUrl(streamUrl)) {
+                await switchToNextBackup();
+            }
         }
     } catch (error) {
         console.error('Error updating stream URL:', error.message);
-        if (!streamUrl) {
-            console.log('Falling back to backup URL');
-            streamUrl = backupStreamUrl;
+        // Test current URL and switch to backup if needed
+        if (!await testStreamUrl(streamUrl)) {
+            await switchToNextBackup();
         }
     }
 }
 
-// Update stream URL every 5 minutes
-setInterval(updateStreamUrl, 5 * 60 * 1000);
+// Update stream URL every 2 minutes
+setInterval(updateStreamUrl, 2 * 60 * 1000);
 // Initial update
 updateStreamUrl();
 
