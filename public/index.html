@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hawas XM Radio</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+        }
+
+        .player-container {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 2rem;
+            border-radius: 15px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            width: 90%;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        .logo {
+            width: 120px;
+            height: 120px;
+            background: #ffffff;
+            border-radius: 50%;
+            margin: 0 auto 1.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            color: #1e3c72;
+            font-weight: bold;
+        }
+
+        h1 {
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+        }
+
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .play-button {
+            background: #ffffff;
+            color: #1e3c72;
+            border: none;
+            padding: 1rem 2rem;
+            border-radius: 50px;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: transform 0.2s;
+            font-weight: bold;
+        }
+
+        .play-button:hover {
+            transform: scale(1.05);
+        }
+
+        .volume-control {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0 1rem;
+        }
+
+        .volume-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            height: 5px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.3);
+            outline: none;
+        }
+
+        .volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: #ffffff;
+            cursor: pointer;
+        }
+
+        .status {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        .now-playing {
+            margin-top: 1rem;
+            font-style: italic;
+            opacity: 0.9;
+        }
+    </style>
+</head>
+<body>
+    <div class="player-container">
+        <div class="logo">HXM</div>
+        <h1>Hawas XM Radio</h1>
+        <div class="controls">
+            <button id="playButton" class="play-button">Play</button>
+            <div class="volume-control">
+                <i class="volume-icon">🔊</i>
+                <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.1" value="0.8">
+            </div>
+        </div>
+        <div id="status" class="status">Click Play to start listening</div>
+        <div id="nowPlaying" class="now-playing"></div>
+    </div>
+
+    <script>
+        let audio = null;
+        const playButton = document.getElementById('playButton');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const status = document.getElementById('status');
+        const nowPlaying = document.getElementById('nowPlaying');
+
+        let isPlaying = false;
+        let retryCount = 0;
+        const maxRetries = 5;
+        let retryTimeout = null;
+        let streamCheckInterval = null;
+        let autoplayAttempted = false;
+        let autoplayInterval = null;
+
+        // Function to attempt autoplay
+        async function attemptAutoplay() {
+            if (!isPlaying) {
+                try {
+                    status.textContent = 'Starting stream...';
+                    if (!audio) {
+                        createNewAudio();
+                    }
+                    await audio.play();
+                    clearInterval(autoplayInterval);
+                } catch (error) {
+                    console.log('Autoplay attempt failed, retrying...');
+                    status.textContent = 'Attempting to start stream...';
+                }
+            }
+        }
+
+        function createNewAudio() {
+            if (audio) {
+                audio.pause();
+                audio.src = '';
+                audio.load();
+                audio.remove();
+                audio = null;
+            }
+            
+            audio = new Audio();
+            audio.crossOrigin = "anonymous";
+            audio.preload = "auto"; // Changed to auto for faster playback
+            audio.src = `http://localhost:3000/stream?t=${Date.now()}`;
+            
+            // Start with very low volume and gradually increase it
+            audio.volume = 0;
+            attachAudioEventListeners();
+        }
+
+        function attachAudioEventListeners() {
+            audio.addEventListener('playing', () => {
+                status.textContent = 'Connected to stream';
+                playButton.textContent = 'Pause';
+                isPlaying = true;
+                retryCount = 0;
+                startStreamCheck();
+                
+                // Gradually increase volume to avoid sudden loud sound
+                let vol = 0;
+                const targetVol = volumeSlider.value;
+                const fadeInterval = setInterval(() => {
+                    if (vol < targetVol) {
+                        vol = Math.min(vol + 0.1, targetVol);
+                        audio.volume = vol;
+                    } else {
+                        clearInterval(fadeInterval);
+                    }
+                }, 100);
+            });
+
+            audio.addEventListener('waiting', () => {
+                status.textContent = 'Buffering...';
+            });
+
+            audio.addEventListener('error', (e) => {
+                console.error('Audio error:', e);
+                handleStreamError();
+            });
+
+            audio.addEventListener('stalled', () => {
+                console.log('Stream stalled');
+                handleStreamError();
+            });
+
+            audio.addEventListener('abort', () => {
+                console.log('Stream aborted');
+                handleStreamError();
+            });
+
+            audio.addEventListener('canplay', () => {
+                if (isPlaying) {
+                    status.textContent = 'Stream ready';
+                }
+            });
+        }
+
+        function handleStreamError() {
+            if (!isPlaying) return;
+
+            if (retryCount >= maxRetries) {
+                retryCount = 0;
+                startAutoplayAttempts(); // Restart autoplay attempts instead of showing error
+                return;
+            }
+
+            status.textContent = `Reconnecting to stream (${retryCount + 1}/${maxRetries})...`;
+            retryCount++;
+
+            if (retryTimeout) {
+                clearTimeout(retryTimeout);
+            }
+
+            retryTimeout = setTimeout(() => {
+                if (isPlaying) {
+                    createNewAudio();
+                    startStream();
+                }
+            }, 2000);
+        }
+
+        function startAutoplayAttempts() {
+            clearInterval(autoplayInterval);
+            autoplayInterval = setInterval(attemptAutoplay, 3000);
+        }
+
+        function startStreamCheck() {
+            stopStreamCheck();
+            streamCheckInterval = setInterval(() => {
+                if (isPlaying && audio && audio.readyState === 0) {
+                    console.log('Stream check failed, attempting recovery');
+                    handleStreamError();
+                }
+            }, 5000);
+        }
+
+        function stopStreamCheck() {
+            if (streamCheckInterval) {
+                clearInterval(streamCheckInterval);
+                streamCheckInterval = null;
+            }
+        }
+
+        async function startStream() {
+            if (!audio) {
+                createNewAudio();
+            }
+
+            try {
+                status.textContent = 'Connecting to stream...';
+                await audio.load();
+                const playPromise = audio.play();
+                
+                if (playPromise !== undefined) {
+                    playPromise
+                        .then(() => {
+                            playButton.textContent = 'Pause';
+                            status.textContent = 'Playing...';
+                            isPlaying = true;
+                        })
+                        .catch(error => {
+                            console.error('Error playing stream:', error);
+                            if (error.name === 'NotAllowedError') {
+                                status.textContent = 'Click Play to start listening';
+                                isPlaying = false;
+                            } else {
+                                handleStreamError();
+                            }
+                        });
+                }
+            } catch (error) {
+                console.error('Stream start error:', error);
+                handleStreamError();
+            }
+        }
+
+        function stopStream() {
+            isPlaying = false;
+            if (audio) {
+                audio.pause();
+                audio.src = '';
+                audio.load();
+            }
+            stopStreamCheck();
+            if (retryTimeout) {
+                clearTimeout(retryTimeout);
+            }
+            startAutoplayAttempts(); // Restart autoplay attempts when stopped
+        }
+
+        playButton.addEventListener('click', () => {
+            if (!isPlaying) {
+                status.textContent = 'Connecting...';
+                startStream();
+            } else {
+                stopStream();
+            }
+        });
+
+        volumeSlider.addEventListener('input', (e) => {
+            if (audio) {
+                audio.volume = e.target.value;
+            }
+        });
+
+        // Modified load handler - Start immediate autoplay attempts
+        window.addEventListener('load', () => {
+            createNewAudio();
+            startAutoplayAttempts();
+
+            // Also attempt autoplay when the window gains focus
+            window.addEventListener('focus', () => {
+                if (!isPlaying) {
+                    attemptAutoplay();
+                }
+            });
+
+            // Attempt to resume playback after user interaction
+            document.addEventListener('click', () => {
+                if (!isPlaying) {
+                    attemptAutoplay();
+                }
+            });
+        });
+
+        // Handle page visibility
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                console.log('Page hidden, continuing playback');
+            } else {
+                console.log('Page visible, checking stream');
+                if (!isPlaying) {
+                    attemptAutoplay();
+                } else if (!audio || audio.readyState === 0) {
+                    console.log('Stream needs recovery after visibility change');
+                    handleStreamError();
+                }
+            }
+        });
+    </script>
+</body>
+</html> 
