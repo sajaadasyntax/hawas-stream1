@@ -95,8 +95,8 @@ const server = http.createServer(async (req, res) => {
 
     // Route handling
     if (req.url === '/' || req.url.startsWith('/?')) {
-        // Serve the index.html file
-        serveStaticFile(res, path.join(__dirname, '../public/index.html'), 'text/html');
+        // Serve the index.html file from root directory
+        serveStaticFile(res, path.join(__dirname, '../index.html'), 'text/html');
     } else if (req.url.startsWith('/stream')) {
         try {
             console.log('Stream request received, using URL:', streamUrl);

@@ -123,7 +123,7 @@
                 <input type="range" id="volumeSlider" class="volume-slider" min="0" max="1" step="0.1" value="0.8">
             </div>
         </div>
-        <div id="status" class="status">Click Play to start listening</div>
+        <div id="status" class="status">Starting stream...</div>
         <div id="nowPlaying" class="now-playing"></div>
     </div>
 
@@ -170,7 +170,7 @@
             
             audio = new Audio();
             audio.crossOrigin = "anonymous";
-            audio.preload = "auto"; // Changed to auto for faster playback
+            audio.preload = "auto";
             audio.src = `http://localhost:3000/stream?t=${Date.now()}`;
             
             // Start with very low volume and gradually increase it
@@ -230,7 +230,7 @@
 
             if (retryCount >= maxRetries) {
                 retryCount = 0;
-                startAutoplayAttempts(); // Restart autoplay attempts instead of showing error
+                startAutoplayAttempts();
                 return;
             }
 
@@ -290,12 +290,7 @@
                         })
                         .catch(error => {
                             console.error('Error playing stream:', error);
-                            if (error.name === 'NotAllowedError') {
-                                status.textContent = 'Click Play to start listening';
-                                isPlaying = false;
-                            } else {
-                                handleStreamError();
-                            }
+                            handleStreamError();
                         });
                 }
             } catch (error) {
@@ -315,7 +310,7 @@
             if (retryTimeout) {
                 clearTimeout(retryTimeout);
             }
-            startAutoplayAttempts(); // Restart autoplay attempts when stopped
+            startAutoplayAttempts();
         }
 
         playButton.addEventListener('click', () => {
@@ -333,7 +328,7 @@
             }
         });
 
-        // Modified load handler - Start immediate autoplay attempts
+        // Start autoplay immediately
         window.addEventListener('load', () => {
             createNewAudio();
             startAutoplayAttempts();
