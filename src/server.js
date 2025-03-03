@@ -13,24 +13,29 @@ let streamUrl = backupStreamUrls[0];
 let currentBackupIndex = 0;
 let lastSuccessfulUrl = null;
 
+// Increase default timeout for axios
+axios.defaults.timeout = 15000;
+
 // Function to test if a URL is accessible with better timeout handling
 async function testStreamUrl(url) {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // Increased timeout
 
         const response = await axios.get(url, {
             responseType: 'stream',
-            timeout: 3000,
+            timeout: 5000,
             signal: controller.signal,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': '*/*',
-                'Range': 'bytes=0-8192'
+                'Range': 'bytes=0-8192',
+                'Connection': 'keep-alive'
             },
             validateStatus: function (status) {
                 return status >= 200 && status < 300 || status === 206;
-            }
+            },
+            maxRedirects: 5
         });
 
         clearTimeout(timeoutId);
@@ -40,7 +45,7 @@ async function testStreamUrl(url) {
             const timeout = setTimeout(() => {
                 response.data.destroy();
                 reject(new Error('Data timeout'));
-            }, 2000);
+            }, 3000); // Increased data timeout
 
             response.data.once('data', chunk => {
                 clearTimeout(timeout);
@@ -183,159 +188,186 @@ const serveStaticFile = (res, filePath, contentType) => {
     });
 };
 
-// Create HTTP server
+// Create HTTP server with proper error handling
 const server = http.createServer(async (req, res) => {
-    // Set CORS headers for all responses
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    try {
+        // Set CORS headers for all responses
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
 
-    // Handle OPTIONS request for CORS
-    if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-    }
+        // Handle OPTIONS request for CORS
+        if (req.method === 'OPTIONS') {
+            res.writeHead(200);
+            res.end();
+            return;
+        }
 
-    // Route handling
-    if (req.url === '/' || req.url.startsWith('/?')) {
-        // Serve the index.html file from root directory
-        serveStaticFile(res, path.join(__dirname, '../index.html'), 'text/html');
-    } else if (req.url.startsWith('/stream')) {
-        try {
-            console.log('Stream request received, using URL:', streamUrl);
-            
-            // Test the current stream URL before serving
-            const isUrlWorking = await testStreamUrl(streamUrl);
-            if (!isUrlWorking) {
-                console.log('Current stream URL not working, switching to backup...');
-                await switchToNextBackup();
-            }
-
-            const userAgent = req.headers['user-agent'] || '';
-            const isMobile = /iPhone|iPad|iPod|Android/i.test(userAgent);
-            
-            // Set appropriate headers for streaming
-            const headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Encoding': 'identity;q=1, *;q=0',
-                'Range': 'bytes=0-',
-                'Connection': 'keep-alive',
-                'Cache-Control': 'no-cache'
-            };
-
-            // Add mobile-specific headers
-            if (isMobile) {
-                headers['Cache-Control'] = 'no-store';
-                headers['X-Playback-Session-Id'] = Date.now().toString();
-            }
-
-            const response = await axios({
-                method: 'get',
-                url: streamUrl,
-                responseType: 'stream',
-                timeout: isMobile ? 15000 : 10000,
-                headers: headers,
-                maxRedirects: 5,
-                validateStatus: function (status) {
-                    return status >= 200 && status < 300 || status === 206;
+        // Route handling
+        if (req.url === '/' || req.url.startsWith('/?')) {
+            serveStaticFile(res, path.join(__dirname, '../index.html'), 'text/html');
+        } else if (req.url.startsWith('/stream')) {
+            try {
+                console.log('Stream request received, using URL:', streamUrl);
+                
+                // Test the current stream URL before serving
+                const isUrlWorking = await testStreamUrl(streamUrl);
+                if (!isUrlWorking) {
+                    console.log('Current stream URL not working, switching to backup...');
+                    await switchToNextBackup();
                 }
-            });
 
-            // Set response headers
-            const responseHeaders = {
-                'Content-Type': 'audio/mpeg',
-                'Transfer-Encoding': 'chunked',
-                'Cache-Control': 'no-cache, no-store',
-                'X-Content-Type-Options': 'nosniff',
-                'Access-Control-Allow-Origin': '*',
-                'Connection': 'keep-alive',
-                'Accept-Ranges': 'bytes'
-            };
+                const userAgent = req.headers['user-agent'] || '';
+                const isMobile = /iPhone|iPad|iPod|Android/i.test(userAgent);
+                
+                // Set appropriate headers for streaming
+                const headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'identity;q=1, *;q=0',
+                    'Range': 'bytes=0-',
+                    'Connection': 'keep-alive',
+                    'Cache-Control': 'no-cache',
+                    'Pragma': 'no-cache'
+                };
 
-            if (isMobile) {
-                responseHeaders['X-Playback-Session-Id'] = Date.now().toString();
-            }
-
-            res.writeHead(200, responseHeaders);
-
-            // Set up stream error handling
-            let streamEnded = false;
-            let dataReceived = false;
-            let streamTimeout = null;
-
-            const cleanup = () => {
-                if (streamTimeout) {
-                    clearTimeout(streamTimeout);
-                    streamTimeout = null;
+                // Add mobile-specific headers
+                if (isMobile) {
+                    headers['Cache-Control'] = 'no-store';
+                    headers['X-Playback-Session-Id'] = Date.now().toString();
                 }
-                if (!streamEnded) {
-                    streamEnded = true;
-                    try {
-                        response.data.destroy();
-                    } catch (e) {
-                        console.error('Error during stream cleanup:', e);
+
+                const response = await axios({
+                    method: 'get',
+                    url: streamUrl,
+                    responseType: 'stream',
+                    timeout: isMobile ? 20000 : 15000, // Increased timeouts
+                    headers: headers,
+                    maxRedirects: 5,
+                    validateStatus: function (status) {
+                        return status >= 200 && status < 300 || status === 206;
                     }
-                }
-            };
+                });
 
-            // Set initial stream timeout
-            streamTimeout = setTimeout(() => {
-                if (!dataReceived) {
-                    console.error('Stream timeout - no data received');
-                    cleanup();
-                    if (!res.headersSent) {
-                        res.writeHead(504);
-                    }
-                    res.end();
-                }
-            }, 10000);
+                // Set response headers
+                const responseHeaders = {
+                    'Content-Type': 'audio/mpeg',
+                    'Transfer-Encoding': 'chunked',
+                    'Cache-Control': 'no-cache, no-store, must-revalidate',
+                    'Pragma': 'no-cache',
+                    'Expires': '0',
+                    'X-Content-Type-Options': 'nosniff',
+                    'Access-Control-Allow-Origin': '*',
+                    'Connection': 'keep-alive',
+                    'Accept-Ranges': 'bytes'
+                };
 
-            // Handle client disconnect
-            req.on('close', cleanup);
-            req.on('end', cleanup);
-            
-            // Handle stream errors
-            response.data.on('error', (error) => {
-                console.error('Stream error:', error);
-                cleanup();
-                if (!res.headersSent) {
-                    res.writeHead(500);
+                if (isMobile) {
+                    responseHeaders['X-Playback-Session-Id'] = Date.now().toString();
                 }
-                res.end();
-            });
 
-            // Monitor data flow
-            response.data.on('data', (chunk) => {
-                if (!dataReceived) {
-                    dataReceived = true;
+                res.writeHead(200, responseHeaders);
+
+                // Set up stream error handling with improved cleanup
+                let streamEnded = false;
+                let dataReceived = false;
+                let streamTimeout = null;
+                let keepAliveInterval = null;
+
+                const cleanup = () => {
                     if (streamTimeout) {
                         clearTimeout(streamTimeout);
                         streamTimeout = null;
                     }
-                }
-            });
+                    if (keepAliveInterval) {
+                        clearInterval(keepAliveInterval);
+                        keepAliveInterval = null;
+                    }
+                    if (!streamEnded) {
+                        streamEnded = true;
+                        try {
+                            response.data.destroy();
+                        } catch (e) {
+                            console.error('Error during stream cleanup:', e);
+                        }
+                    }
+                };
 
-            // Pipe the stream with error handling
-            response.data.pipe(res).on('error', (error) => {
-                console.error('Pipe error:', error);
-                cleanup();
-            });
+                // Set initial stream timeout
+                streamTimeout = setTimeout(() => {
+                    if (!dataReceived) {
+                        console.error('Stream timeout - no data received');
+                        cleanup();
+                        if (!res.headersSent) {
+                            res.writeHead(504);
+                        }
+                        res.end();
+                    }
+                }, 15000); // Increased timeout
 
-        } catch (error) {
-            console.error('Error connecting to radio stream:', error.message);
-            res.writeHead(500);
-            res.end('Error connecting to radio stream');
+                // Keep-alive interval to prevent connection drops
+                keepAliveInterval = setInterval(() => {
+                    if (!streamEnded && dataReceived) {
+                        res.write('');
+                    }
+                }, 30000);
+
+                // Handle client disconnect
+                req.on('close', cleanup);
+                req.on('end', cleanup);
+                
+                // Handle stream errors
+                response.data.on('error', (error) => {
+                    console.error('Stream error:', error);
+                    cleanup();
+                    if (!res.headersSent) {
+                        res.writeHead(500);
+                    }
+                    res.end();
+                });
+
+                // Monitor data flow
+                response.data.on('data', (chunk) => {
+                    if (!dataReceived) {
+                        dataReceived = true;
+                        if (streamTimeout) {
+                            clearTimeout(streamTimeout);
+                            streamTimeout = null;
+                        }
+                    }
+                });
+
+                // Pipe the stream with error handling
+                response.data.pipe(res).on('error', (error) => {
+                    console.error('Pipe error:', error);
+                    cleanup();
+                });
+
+            } catch (error) {
+                console.error('Error connecting to radio stream:', error.message);
+                res.writeHead(500);
+                res.end('Error connecting to radio stream');
+            }
+        } else {
+            // Handle 404
+            res.writeHead(404);
+            res.end('Not found');
         }
-    } else {
-        // Handle 404
-        res.writeHead(404);
-        res.end('Not found');
+    } catch (error) {
+        console.error('Server error:', error);
+        if (!res.headersSent) {
+            res.writeHead(500);
+            res.end('Internal Server Error');
+        }
     }
 });
 
-server.listen(port, (err) => {
+// Error handling for the server
+server.on('error', (error) => {
+    console.error('Server error:', error);
+});
+
+server.listen(port, '0.0.0.0', (err) => {
     if (err) {
         console.error('Failed to start server:', err);
         process.exit(1);

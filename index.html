@@ -128,6 +128,8 @@
     </div>
 
     <script>
+        // Get the server URL dynamically
+        const serverUrl = window.location.origin;
         let audio = null;
         const playButton = document.getElementById('playButton');
         const volumeSlider = document.getElementById('volumeSlider');
@@ -140,7 +142,7 @@
         let retryTimeout = null;
         let streamCheckInterval = null;
         let lastPlayAttempt = 0;
-        const playAttemptDelay = 2000; // 2 seconds between play attempts
+        const playAttemptDelay = 2000;
         let autoplayAttempted = false;
         let autoplayInterval = null;
         const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
@@ -187,10 +189,9 @@
             audio = new Audio();
             audio.crossOrigin = "anonymous";
             audio.preload = "auto";
-            // Add cache busting parameter and timestamp
-            audio.src = `http://localhost:3000/stream?t=${Date.now()}`;
+            // Use the dynamic server URL instead of hardcoded localhost
+            audio.src = `${serverUrl}/stream?t=${Date.now()}`;
             
-            // Start with very low volume and gradually increase it
             audio.volume = volumeSlider.value;
             attachAudioEventListeners();
 
@@ -256,7 +257,7 @@
             }
 
             if (retryCount >= maxRetries) {
-                status.textContent = 'Stream error. Click Play to try again.';
+                status.textContent = 'Unable to connect. Please try again later.';
                 stopStream();
                 return;
             }
@@ -279,7 +280,7 @@
                         handleStreamError();
                     }
                 }
-            }, 1000);
+            }, 2000); // Increased retry delay for VPS
         }
 
         function startStreamCheck() {
@@ -313,22 +314,28 @@
                 status.textContent = 'Connecting to stream...';
                 createNewAudio();
                 
-                // Pre-buffer the stream
+                // Pre-buffer the stream with timeout
                 await new Promise((resolve, reject) => {
                     const loadTimeout = setTimeout(() => {
                         reject(new Error('Loading timeout'));
-                    }, 5000);
+                    }, 10000); // Increased timeout for VPS
+
+                    const errorHandler = (error) => {
+                        clearTimeout(loadTimeout);
+                        reject(error || new Error('Loading failed'));
+                    };
 
                     audio.addEventListener('canplay', () => {
                         clearTimeout(loadTimeout);
                         resolve();
                     }, { once: true });
 
-                    audio.addEventListener('error', () => {
-                        clearTimeout(loadTimeout);
-                        reject(new Error('Loading failed'));
-                    }, { once: true });
+                    audio.addEventListener('error', errorHandler, { once: true });
+                    audio.addEventListener('abort', errorHandler, { once: true });
 
+                    // Handle network errors
+                    window.addEventListener('offline', errorHandler, { once: true });
+                    
                     audio.load();
                 });
 
@@ -339,7 +346,7 @@
                 retryCount = 0;
             } catch (error) {
                 console.error('Stream start error:', error);
-                status.textContent = 'Error connecting. Retrying...';
+                status.textContent = 'Connection error. Retrying...';
                 handleStreamError();
             }
         }
