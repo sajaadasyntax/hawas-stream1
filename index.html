@@ -139,8 +139,11 @@
         const maxRetries = 5;
         let retryTimeout = null;
         let streamCheckInterval = null;
+        let lastPlayAttempt = 0;
+        const playAttemptDelay = 2000; // 2 seconds between play attempts
         let autoplayAttempted = false;
         let autoplayInterval = null;
+        const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
         // Function to attempt autoplay
         async function attemptAutoplay() {
@@ -150,11 +153,24 @@
                     if (!audio) {
                         createNewAudio();
                     }
+
+                    // For mobile, we need user interaction
+                    if (isMobile) {
+                        audio.load();
+                        status.textContent = 'Tap Play to start listening';
+                        return;
+                    }
+
                     await audio.play();
                     clearInterval(autoplayInterval);
                 } catch (error) {
-                    console.log('Autoplay attempt failed, retrying...');
-                    status.textContent = 'Attempting to start stream...';
+                    console.log('Autoplay attempt failed:', error);
+                    if (error.name === 'NotAllowedError' || isMobile) {
+                        status.textContent = 'Tap Play to start listening';
+                        clearInterval(autoplayInterval);
+                    } else {
+                        status.textContent = 'Attempting to start stream...';
+                    }
                 }
             }
         }
@@ -171,11 +187,21 @@
             audio = new Audio();
             audio.crossOrigin = "anonymous";
             audio.preload = "auto";
+            // Add cache busting parameter and timestamp
             audio.src = `http://localhost:3000/stream?t=${Date.now()}`;
             
             // Start with very low volume and gradually increase it
-            audio.volume = 0;
+            audio.volume = volumeSlider.value;
             attachAudioEventListeners();
+
+            // For mobile, we need to load on user interaction
+            if (isMobile) {
+                audio.addEventListener('loadedmetadata', () => {
+                    if (!isPlaying) {
+                        status.textContent = 'Tap Play to start listening';
+                    }
+                });
+            }
         }
 
         function attachAudioEventListeners() {
@@ -185,18 +211,6 @@
                 isPlaying = true;
                 retryCount = 0;
                 startStreamCheck();
-                
-                // Gradually increase volume to avoid sudden loud sound
-                let vol = 0;
-                const targetVol = volumeSlider.value;
-                const fadeInterval = setInterval(() => {
-                    if (vol < targetVol) {
-                        vol = Math.min(vol + 0.1, targetVol);
-                        audio.volume = vol;
-                    } else {
-                        clearInterval(fadeInterval);
-                    }
-                }, 100);
             });
 
             audio.addEventListener('waiting', () => {
@@ -223,43 +237,59 @@
                     status.textContent = 'Stream ready';
                 }
             });
+
+            // Add suspend event handler for mobile
+            audio.addEventListener('suspend', () => {
+                if (isMobile && !isPlaying) {
+                    status.textContent = 'Tap Play to start listening';
+                }
+            });
         }
 
         function handleStreamError() {
             if (!isPlaying) return;
 
-            if (retryCount >= maxRetries) {
-                retryCount = 0;
-                startAutoplayAttempts();
+            const now = Date.now();
+            if (now - lastPlayAttempt < playAttemptDelay) {
+                console.log('Too soon to retry, waiting...');
                 return;
             }
 
-            status.textContent = `Reconnecting to stream (${retryCount + 1}/${maxRetries})...`;
+            if (retryCount >= maxRetries) {
+                status.textContent = 'Stream error. Click Play to try again.';
+                stopStream();
+                return;
+            }
+
+            status.textContent = `Reconnecting (${retryCount + 1}/${maxRetries})...`;
             retryCount++;
+            lastPlayAttempt = now;
 
             if (retryTimeout) {
                 clearTimeout(retryTimeout);
             }
 
-            retryTimeout = setTimeout(() => {
+            retryTimeout = setTimeout(async () => {
                 if (isPlaying) {
-                    createNewAudio();
-                    startStream();
+                    try {
+                        createNewAudio();
+                        await audio.play();
+                    } catch (error) {
+                        console.error('Retry failed:', error);
+                        handleStreamError();
+                    }
                 }
-            }, 2000);
-        }
-
-        function startAutoplayAttempts() {
-            clearInterval(autoplayInterval);
-            autoplayInterval = setInterval(attemptAutoplay, 3000);
+            }, 1000);
         }
 
         function startStreamCheck() {
             stopStreamCheck();
             streamCheckInterval = setInterval(() => {
-                if (isPlaying && audio && audio.readyState === 0) {
-                    console.log('Stream check failed, attempting recovery');
-                    handleStreamError();
+                if (isPlaying && audio) {
+                    if (audio.readyState === 0 || audio.error) {
+                        console.log('Stream check failed, attempting recovery');
+                        handleStreamError();
+                    }
                 }
             }, 5000);
         }
@@ -272,40 +302,59 @@
         }
 
         async function startStream() {
-            if (!audio) {
-                createNewAudio();
+            const now = Date.now();
+            if (now - lastPlayAttempt < playAttemptDelay) {
+                console.log('Too soon to start stream, waiting...');
+                return;
             }
+            lastPlayAttempt = now;
 
             try {
                 status.textContent = 'Connecting to stream...';
-                await audio.load();
-                const playPromise = audio.play();
+                createNewAudio();
                 
-                if (playPromise !== undefined) {
-                    playPromise
-                        .then(() => {
-                            playButton.textContent = 'Pause';
-                            status.textContent = 'Playing...';
-                            isPlaying = true;
-                        })
-                        .catch(error => {
-                            console.error('Error playing stream:', error);
-                            handleStreamError();
-                        });
-                }
+                // Pre-buffer the stream
+                await new Promise((resolve, reject) => {
+                    const loadTimeout = setTimeout(() => {
+                        reject(new Error('Loading timeout'));
+                    }, 5000);
+
+                    audio.addEventListener('canplay', () => {
+                        clearTimeout(loadTimeout);
+                        resolve();
+                    }, { once: true });
+
+                    audio.addEventListener('error', () => {
+                        clearTimeout(loadTimeout);
+                        reject(new Error('Loading failed'));
+                    }, { once: true });
+
+                    audio.load();
+                });
+
+                await audio.play();
+                playButton.textContent = 'Pause';
+                status.textContent = 'Playing...';
+                isPlaying = true;
+                retryCount = 0;
             } catch (error) {
                 console.error('Stream start error:', error);
+                status.textContent = 'Error connecting. Retrying...';
                 handleStreamError();
             }
         }
 
         function stopStream() {
             isPlaying = false;
+            playButton.textContent = 'Play';
+            status.textContent = 'Stream stopped';
+            
             if (audio) {
                 audio.pause();
                 audio.src = '';
                 audio.load();
             }
+            
             stopStreamCheck();
             if (retryTimeout) {
                 clearTimeout(retryTimeout);
@@ -313,9 +362,13 @@
             startAutoplayAttempts();
         }
 
-        playButton.addEventListener('click', () => {
+        function startAutoplayAttempts() {
+            clearInterval(autoplayInterval);
+            autoplayInterval = setInterval(attemptAutoplay, 3000);
+        }
+
+        playButton.addEventListener('click', async () => {
             if (!isPlaying) {
-                status.textContent = 'Connecting...';
                 startStream();
             } else {
                 stopStream();
@@ -328,25 +381,21 @@
             }
         });
 
-        // Start autoplay immediately
         window.addEventListener('load', () => {
             createNewAudio();
-            startAutoplayAttempts();
-
-            // Also attempt autoplay when the window gains focus
-            window.addEventListener('focus', () => {
-                if (!isPlaying) {
-                    attemptAutoplay();
-                }
-            });
-
-            // Attempt to resume playback after user interaction
-            document.addEventListener('click', () => {
-                if (!isPlaying) {
-                    attemptAutoplay();
-                }
-            });
+            if (!isMobile) {
+                startAutoplayAttempts();
+            } else {
+                status.textContent = 'Tap Play to start listening';
+            }
         });
+
+        // Add touchstart event listener for mobile
+        document.addEventListener('touchstart', () => {
+            if (!isPlaying && audio) {
+                audio.load();
+            }
+        }, { once: true });
 
         // Handle page visibility
         document.addEventListener('visibilitychange', () => {
@@ -354,9 +403,7 @@
                 console.log('Page hidden, continuing playback');
             } else {
                 console.log('Page visible, checking stream');
-                if (!isPlaying) {
-                    attemptAutoplay();
-                } else if (!audio || audio.readyState === 0) {
+                if (isPlaying && (!audio || audio.error || audio.readyState === 0)) {
                     console.log('Stream needs recovery after visibility change');
                     handleStreamError();
                 }

@@ -11,12 +11,13 @@ const backupStreamUrls = [
 ];
 let streamUrl = backupStreamUrls[0];
 let currentBackupIndex = 0;
+let lastSuccessfulUrl = null;
 
-// Function to test if a URL is accessible
+// Function to test if a URL is accessible with better timeout handling
 async function testStreamUrl(url) {
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000); // 3 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
 
         const response = await axios.get(url, {
             responseType: 'stream',
@@ -25,7 +26,10 @@ async function testStreamUrl(url) {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': '*/*',
-                'Range': 'bytes=0-8192' // Only request first 8KB to test
+                'Range': 'bytes=0-8192'
+            },
+            validateStatus: function (status) {
+                return status >= 200 && status < 300 || status === 206;
             }
         });
 
@@ -33,11 +37,21 @@ async function testStreamUrl(url) {
 
         // Get a small chunk of data to verify it's actually streaming
         const chunk = await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                response.data.destroy();
+                reject(new Error('Data timeout'));
+            }, 2000);
+
             response.data.once('data', chunk => {
-                response.data.destroy(); // Clean up the stream
+                clearTimeout(timeout);
+                response.data.destroy();
                 resolve(chunk);
             });
-            response.data.once('error', reject);
+
+            response.data.once('error', err => {
+                clearTimeout(timeout);
+                reject(err);
+            });
         });
 
         return chunk.length > 0;
@@ -47,27 +61,56 @@ async function testStreamUrl(url) {
     }
 }
 
-// Function to switch to next backup URL
+// Function to switch to next backup URL with retry logic
 async function switchToNextBackup() {
-    currentBackupIndex = (currentBackupIndex + 1) % backupStreamUrls.length;
-    streamUrl = backupStreamUrls[currentBackupIndex];
-    console.log('Switched to backup URL:', streamUrl);
+    // If we have a last successful URL and it's different from current, try it first
+    if (lastSuccessfulUrl && lastSuccessfulUrl !== streamUrl) {
+        if (await testStreamUrl(lastSuccessfulUrl)) {
+            streamUrl = lastSuccessfulUrl;
+            console.log('Switched back to last known working URL:', streamUrl);
+            return;
+        }
+    }
+
+    // Try each backup URL in sequence
+    const startIndex = currentBackupIndex;
+    do {
+        currentBackupIndex = (currentBackupIndex + 1) % backupStreamUrls.length;
+        const nextUrl = backupStreamUrls[currentBackupIndex];
+        
+        console.log('Testing backup URL:', nextUrl);
+        if (await testStreamUrl(nextUrl)) {
+            streamUrl = nextUrl;
+            console.log('Switched to working backup URL:', streamUrl);
+            return;
+        }
+    } while (currentBackupIndex !== startIndex);
+
+    // If no URLs work, keep the current one and log the error
+    console.log('No working URLs found, keeping current URL');
 }
 
-// Function to extract stream URL from the source page
+// Function to extract stream URL from the source page with improved error handling
 async function updateStreamUrl() {
     try {
         console.log('Attempting to update stream URL...');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000); // Increased timeout for initial fetch
+
         const response = await axios.get('https://923fm.radiostream321.com/', {
-            timeout: 5000,
+            timeout: 8000,
+            signal: controller.signal,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            }
+            },
+            maxRedirects: 5
         });
+
+        clearTimeout(timeoutId);
         
         const html = response.data;
-        // Extract the stream URL using regex
         const match = html.match(/https:\/\/[^"'\s]+\.mp3[^"'\s]*/);
+        
         if (match) {
             const newUrl = match[0];
             console.log('Found new stream URL:', newUrl);
@@ -75,44 +118,47 @@ async function updateStreamUrl() {
             // Test the new URL
             const isAccessible = await testStreamUrl(newUrl);
             if (isAccessible) {
+                lastSuccessfulUrl = streamUrl; // Store the last working URL
                 streamUrl = newUrl;
                 console.log('Stream URL updated successfully');
             } else {
-                console.log('New URL not accessible, testing backup URLs...');
+                console.log('New URL not accessible, testing current and backup URLs...');
                 
-                // Test all backup URLs
-                for (let url of backupStreamUrls) {
-                    console.log('Testing backup URL:', url);
-                    if (await testStreamUrl(url)) {
-                        streamUrl = url;
-                        console.log('Switched to working backup URL:', url);
-                        return;
-                    }
+                // Test current URL first
+                if (await testStreamUrl(streamUrl)) {
+                    console.log('Current URL still working, keeping it');
+                    return;
                 }
                 
-                // If current URL is not working and no backup works, rotate through backups
                 await switchToNextBackup();
             }
         } else {
-            console.log('No stream URL found in the page, testing backup URLs...');
-            // Test current URL first
+            console.log('No stream URL found in the page, testing current and backup URLs...');
             if (!await testStreamUrl(streamUrl)) {
                 await switchToNextBackup();
             }
         }
     } catch (error) {
         console.error('Error updating stream URL:', error.message);
-        // Test current URL and switch to backup if needed
+        // Only switch to backup if current URL isn't working
         if (!await testStreamUrl(streamUrl)) {
             await switchToNextBackup();
         }
     }
 }
 
-// Update stream URL every 2 minutes
-setInterval(updateStreamUrl, 2 * 60 * 1000);
-// Initial update
-updateStreamUrl();
+// Update stream URL every 3 minutes instead of 2
+setInterval(updateStreamUrl, 3 * 60 * 1000);
+
+// Initial update with retry mechanism
+(async function initialUpdate() {
+    try {
+        await updateStreamUrl();
+    } catch (error) {
+        console.error('Initial update failed, retrying in 10 seconds...');
+        setTimeout(initialUpdate, 10000);
+    }
+})();
 
 // Function to serve static files
 const serveStaticFile = (res, filePath, contentType) => {
@@ -158,40 +204,123 @@ const server = http.createServer(async (req, res) => {
     } else if (req.url.startsWith('/stream')) {
         try {
             console.log('Stream request received, using URL:', streamUrl);
+            
+            // Test the current stream URL before serving
+            const isUrlWorking = await testStreamUrl(streamUrl);
+            if (!isUrlWorking) {
+                console.log('Current stream URL not working, switching to backup...');
+                await switchToNextBackup();
+            }
+
+            const userAgent = req.headers['user-agent'] || '';
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(userAgent);
+            
+            // Set appropriate headers for streaming
+            const headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Encoding': 'identity;q=1, *;q=0',
+                'Range': 'bytes=0-',
+                'Connection': 'keep-alive',
+                'Cache-Control': 'no-cache'
+            };
+
+            // Add mobile-specific headers
+            if (isMobile) {
+                headers['Cache-Control'] = 'no-store';
+                headers['X-Playback-Session-Id'] = Date.now().toString();
+            }
+
             const response = await axios({
                 method: 'get',
                 url: streamUrl,
                 responseType: 'stream',
-                timeout: 10000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                    'Accept': '*/*',
-                    'Accept-Encoding': 'identity;q=1, *;q=0',
-                    'Range': 'bytes=0-'
-                },
-                maxRedirects: 5
+                timeout: isMobile ? 15000 : 10000,
+                headers: headers,
+                maxRedirects: 5,
+                validateStatus: function (status) {
+                    return status >= 200 && status < 300 || status === 206;
+                }
             });
 
-            res.writeHead(200, {
+            // Set response headers
+            const responseHeaders = {
                 'Content-Type': 'audio/mpeg',
                 'Transfer-Encoding': 'chunked',
-                'Cache-Control': 'no-cache',
-                'X-Content-Type-Options': 'nosniff'
-            });
+                'Cache-Control': 'no-cache, no-store',
+                'X-Content-Type-Options': 'nosniff',
+                'Access-Control-Allow-Origin': '*',
+                'Connection': 'keep-alive',
+                'Accept-Ranges': 'bytes'
+            };
 
-            // Pipe the stream directly to the response
-            response.data.pipe(res);
+            if (isMobile) {
+                responseHeaders['X-Playback-Session-Id'] = Date.now().toString();
+            }
+
+            res.writeHead(200, responseHeaders);
+
+            // Set up stream error handling
+            let streamEnded = false;
+            let dataReceived = false;
+            let streamTimeout = null;
+
+            const cleanup = () => {
+                if (streamTimeout) {
+                    clearTimeout(streamTimeout);
+                    streamTimeout = null;
+                }
+                if (!streamEnded) {
+                    streamEnded = true;
+                    try {
+                        response.data.destroy();
+                    } catch (e) {
+                        console.error('Error during stream cleanup:', e);
+                    }
+                }
+            };
+
+            // Set initial stream timeout
+            streamTimeout = setTimeout(() => {
+                if (!dataReceived) {
+                    console.error('Stream timeout - no data received');
+                    cleanup();
+                    if (!res.headersSent) {
+                        res.writeHead(504);
+                    }
+                    res.end();
+                }
+            }, 10000);
 
             // Handle client disconnect
-            req.on('close', () => {
-                console.log('Client disconnected, cleaning up stream');
-                response.data.destroy();
-            });
-
-            // Handle errors
+            req.on('close', cleanup);
+            req.on('end', cleanup);
+            
+            // Handle stream errors
             response.data.on('error', (error) => {
                 console.error('Stream error:', error);
+                cleanup();
+                if (!res.headersSent) {
+                    res.writeHead(500);
+                }
                 res.end();
+            });
+
+            // Monitor data flow
+            response.data.on('data', (chunk) => {
+                if (!dataReceived) {
+                    dataReceived = true;
+                    if (streamTimeout) {
+                        clearTimeout(streamTimeout);
+                        streamTimeout = null;
+                    }
+                }
+            });
+
+            // Pipe the stream with error handling
+            response.data.pipe(res).on('error', (error) => {
+                console.error('Pipe error:', error);
+                cleanup();
             });
 
         } catch (error) {
